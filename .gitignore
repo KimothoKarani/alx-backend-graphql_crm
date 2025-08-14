@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.egg
+*.egg-info/
+*.manifest
+*.spec
+
+# Environment variables & secrets
+.env
+*.env
+
+# Django stuff
+db.sqlite3
+media/
+staticfiles/
+
+# Logs
+*.log
+
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+
+# IDE / Editor folders
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Migrations cache
+*/migrations/__pycache__/
