@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     "crm",
     'django.contrib.sites',
     'accounts',
+    'django_filters',
 ]
 
 SITE_ID = 1
