@@ -39,7 +39,11 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     "graphene_django",
     "crm",
+    'django.contrib.sites',
+    'accounts',
 ]
+
+SITE_ID = 1
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -125,4 +129,8 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 GRAPHENE = {
     'SCHEMA': 'alx_backend_graphql_crm.schema.schema',
+    'RELAY_CONNECTION_MAX_LIMIT': 1000, #Max items returned in a
+    # connection by default
 }
+
+AUTH_USER_MODEL = 'accounts.CustomUser'

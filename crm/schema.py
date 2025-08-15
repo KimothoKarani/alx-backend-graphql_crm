@@ -1,392 +1,237 @@
 import graphene
-from graphene_django import DjangoObjectType
-from graphql.error import GraphQLError
 import datetime
 import decimal
 import re
+from django.core.exceptions import ValidationError, ObjectDoesNotExist
+from django.core.validators import EmailValidator
+# Import Django's specific exceptions
+from django.db import IntegrityError, transaction
+from django.db.models import Q #For complex queries
+from graphene import relay
+from graphene_django.types import DjangoObjectType
+from graphene.relay import Node # For Relay Global IDs if using Node interface
+from graphene_django.filter import DjangoFilterConnectionField
+from django.utils import timezone  # FIXED: Added missing import for timezone
 
+# Import the Django models
+from .models import Customer, Product, Order
 
-class InMemoryDataStore:
-    _customers = []
-    _products = []
-    _orders = []
+# --- 1. GraphQL Output Types (Leveraging DjangoObjectType) ---
+class CustomerType(DjangoObjectType):
 
-    # Counters to generate unique IDs for our records
-    _next_customer_id = 1
-    _next_product_id = 1
-    _next_order_id = 1
+    class Meta:
+        model = Customer
+        fields = '__all__'
+        # Interfaces with Relay Node for global IDs, which is good practice.
+        interfaces = (Node,)
 
-    @classmethod
-    def reset(cls):
-        '''
-        Resets all the data in the in-memory store. Useful for
-        testing or re-seeding
-        '''
-        cls._customers = []
-        cls._products = []
-        cls._orders = []
-        cls._next_customer_id = 1
-        cls._next_product_id = 1
-        cls._next_order_id = 1
+class ProductType(DjangoObjectType):
+    class Meta:
+        model = Product
+        fields = '__all__'
+        interfaces = (Node,)
 
-    @classmethod
-    def create_customer(cls, name, email, phone=None):
-        '''
-        Creates a new customer record and adds it to the store.
-        IDs are stored as strings to match GraphQL String types.
-        '''
-        customer = {
-            "id": str(cls._next_customer_id),
-            "name": name,
-            "email": email,
-            "phone": phone,
-        }
+class OrderType(DjangoObjectType):
+    class Meta:
+        model = Order
+        fields = '__all__'
+        interfaces = (Node,)
 
-        cls._customers.append(customer)
-        cls._next_customer_id += 1
-        return customer
-
-    @classmethod
-    def get_customer_by_id(cls, customer_id):
-        '''
-        Retrieves a customer by its ID.
-        next((...  for ... if ...), None) is a Pythonic way to find the
-        first matching customer or return None if no match is found.
-        '''
-        cid = str(customer_id)
-        for customer in cls._customers:
-            if str(customer["id"]) == cid:
-                return customer
-        return None  # <-- return after the loop
-
-    @classmethod
-    def is_customer_email_unique(cls, email, exclude_customer_id=None):
-        '''
-        Checks whether a customer email is unique across all customers.
-        'exclude_customer_id' is used when updating a customer to
-        ignore their own email.
-        '''
-        exclude = str(exclude_customer_id) if exclude_customer_id is not None else None
-        for customer in cls._customers:
-            if customer["email"] == email and customer["id"] != exclude:
-                return False
-        return True  # <-- return after checking all
-
-    @classmethod
-    def create_product(cls, name, price, stock=0):
-        '''
-        Creates a new product record and adds it to the store.
-        Price is stored as decimal for precision.
-        '''
-
-        product = {
-            "id": str(cls._next_product_id),
-            "name": name,
-            "price": decimal.Decimal(str(price)), #Convert to Decimal for storage
-            "stock": int(stock),
-        }
-        cls._products.append(product)
-        cls._next_product_id += 1
-        return product
-
-    @classmethod
-    def get_product_by_id(cls, product_id):
-        '''
-        Retrieves a product by its ID.
-        '''
-
-        pid = str(product_id)
-        for product in cls._products:
-            if str(product["id"]) == pid:
-                return product
-        return None  # <-- return after the loop
-
-    @classmethod
-    def create_order(cls, customer_id, product_id, total_amount, order_date=None):
-        '''
-        Creates a new order record and adds it to the store.
-        '''
-
-        if order_date is None:
-            order_date = datetime.datetime.now(datetime.timezone.utc)
-        order = {
-            "id": str(cls._next_order_id),
-            "customer_id": customer_id,
-            "product_id": product_id,
-            "total_amount": total_amount,
-            "order_date": order_date,
-        }
-        cls._orders.append(order)
-        cls._next_order_id += 1
-        return order
-
-    @classmethod
-    def get_all_customers(cls):
-        '''
-        Retrieves all the customers in the store.
-        '''
-        return cls._customers
-
-    @classmethod
-    def get_all_products(cls):
-        return cls._products
-
-    @classmethod
-    def get_all_orders(cls):
-        '''
-        Returns all order records, reconstructing, nested nested customer and
-        product data for GraphQL's consumption.
-        '''
-        orders_with_details = []
-        for order in cls._orders:
-            customer = cls.get_customer_by_id(order['customer_id'])
-            products_in_order = []
-            #Fetch each product object based on its ID
-            for prod_id in order['product_id']:
-                product = cls.get_product_by_id(prod_id)
-                if product:
-                    products_in_order.append(product)
-
-            # Create a copy of the order and add the full customer and product objects
-            # This is important because Graphene expects these nested objects for OrderType
-            order_copy = order.copy()
-            order_copy["customer"] = customer
-            order_copy["products"] = products_in_order
-            orders_with_details.append(order_copy)
-        return orders_with_details
-
-# ---- 1. Gra[hQL Output Types (Define the shape of data clients receive)--------
-
-class CustomerType(graphene.ObjectType):
-    """
-    Defines the structure of a Customer object for GraphQL queries and mutation outputs.
-    Clients will see and query these fields.
-    """
-    id = graphene.String(description="Unique identifier for the customer.")
-    name = graphene.String(description="The customer's full name.")
-    email = graphene.String(description="The customer's email address (unique).")
-    phone = graphene.String(description="The customer's phone number (optional).")
-
-class ProductType(graphene.ObjectType):
-    """
-    Defines the structure of a Product object for GraphQL.
-    """
-    id = graphene.String(description="Unique identifier for the product.")
-    name = graphene.String(description="The product's name.")
-    price = graphene.Decimal(description="The product's price.")
-    stock = graphene.Int(description="The quantity of this product in stock.")
-
-class OrderType(graphene.ObjectType):
-    """
-    Defines the structure of an Order object for GraphQL.
-    Includes nested CustomerType and a list of ProductType for detailed responses.
-    """
-    id = graphene.String(description="Unique identifier for the order.")
-    customer = graphene.Field(CustomerType, description="The customer who placed this order.")
-    products = graphene.List(ProductType, description="The list of products included in this order.")
-    total_amount = graphene.Decimal(description="The calculated total amount of the order.")
-    order_date = graphene.DateTime(description="The date and time the order was placed.")
-
-# --- Custom Error Type (for structured error handling in mutation responses) ---
+# --- Custom Error Type (Remains the same, as it's a generic GraphQL structure) ---
 class ErrorType(graphene.ObjectType):
-    """
-    A reusable GraphQL type for returning specific error details.
-    Allows for more granular error messages than just raising a top-level exception.
-    """
-    field = graphene.String(description="The specific input field that caused the error (e.g., 'email', 'price').")
+    field = graphene.String(description="The specific input field that caused the error.")
     message = graphene.String(description="A user-friendly description of the error.")
     code = graphene.String(description="An optional machine-readable error code (e.g., 'INVALID_FORMAT', 'DUPLICATE_EMAIL').")
 
-# --- 2. GraphQL Input Types (Define the shape of data clients send to mutations) ---
-
+# --- 2. GraphQL Input Types (Remains the same, as these define API input shapes) ---
 class CustomerInput(graphene.InputObjectType):
-    """
-    Defines the input structure for `CreateCustomer` and `BulkCreateCustomers` mutations.
-    Clients will provide data conforming to this shape.
-    """
     name = graphene.String(required=True, description="The customer's full name.")
     email = graphene.String(required=True, description="The customer's email address.")
     phone = graphene.String(description="The customer's phone number.")
 
 class ProductInput(graphene.InputObjectType):
-    """
-    Defines the input structure for `CreateProduct` mutation.
-    """
     name = graphene.String(required=True, description="The product's name.")
     price = graphene.Decimal(required=True, description="The product's price (must be positive).")
     stock = graphene.Int(default_value=0, description="The quantity of product in stock (cannot be negative).")
 
-# --- 3. Mutations (Operations that modify data) ---
+
+# --- 3. Mutations (Adapted to use Django ORM) ---
 
 class CreateCustomer(graphene.Mutation):
     """
-    Mutation to create a single Customer instance.
-    Handles email uniqueness and phone format validation.
+    Mutation to create a single Customer instance using Django ORM.
+    Handles validation errors from Django's model and custom regex.
     """
+
     class Arguments:
-        # 'input' is a single argument of type CustomerInput, encapsulating all customer details.
         input = CustomerInput(required=True)
 
-    # Output fields for this mutation (what is returned upon success or structured failure)
     customer = graphene.Field(CustomerType, description="The customer object if successfully created.")
     message = graphene.String(description="A message indicating the outcome of the operation.")
     success = graphene.Boolean(description="True if the customer was created, False otherwise.")
     errors = graphene.List(ErrorType, description="A list of detailed errors if validation failed.")
 
     def mutate(self, info, input):
-        # --- Validation Logic ---
         validation_errors = []
 
-        # 1. Validate email format using a regular expression
-        email_regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        if not re.fullmatch(email_regex, input.email):
+        # Phone format validation (still a good idea here for immediate feedback)
+        phone_regex_pattern = r"^(\+\d{1,3})?\d{10,15}$|^\d{3}[-\s]?\d{3}[-\s]?\d{4}$"
+        if input.phone and not re.fullmatch(phone_regex_pattern, input.phone):
             validation_errors.append(ErrorType(
-                field="email",
-                message="Invalid email format.",
+                field="phone",
+                message="Invalid phone format. Expected: +1234567890 or 123-456-7890.",
                 code="INVALID_FORMAT"
             ))
 
-        # 2. Ensure email is unique in our data store
-        if InMemoryDataStore.is_customer_email_unique(input.email) is False:
-            validation_errors.append(ErrorType(
-                field="email",
-                message="Email already exists.",
-                code="DUPLICATE_EMAIL"
-            ))
-
-        # 3. Validate phone format if provided
-        if input.phone:
-            # Simple phone regex: allows optional '+' then 10-15 digits, OR 3-3-4 digit format with hyphens.
-            # For robust phone validation, a library like `phonenumbers` is recommended.
-            phone_regex = r"^(\+\d{1,3})?\d{10,15}$|^\d{3}-\d{3}-\d{4}$"
-            if not re.fullmatch(phone_regex, input.phone):
-                validation_errors.append(ErrorType(
-                    field="phone",
-                    message="Invalid phone format. Expected: +1234567890 or 123-456-7890.",
-                    code="INVALID_FORMAT"
-                ))
-
-        # If any validation errors occurred, return them immediately
         if validation_errors:
             return CreateCustomer(success=False, errors=validation_errors)
 
-        # --- Business Logic (If validation passes, create the customer) ---
-        customer_data = InMemoryDataStore.create_customer(
-            name=input.name,
-            email=input.email,
-            phone=input.phone
-        )
+        try:
+            # Create the customer using Django ORM
+            customer = Customer.objects.create(
+                name=input.name,
+                email=input.email,  # Django's EmailField and unique=True will handle email validity and uniqueness
+                phone=input.phone
+            )
+            # You might call customer.full_clean() here to run all model validators
+            customer.full_clean()
+            # customer.save() # If not using .create(), you'd save after full_clean()
 
-        # --- Return Success Response ---
-        # We instantiate the mutation class and pass the data for its output fields.
-        return CreateCustomer(
-            customer=CustomerType(**customer_data), # Convert the customer dictionary to CustomerType
-            message="Customer created successfully.",
-            success=True,
-            errors=[] # Empty list indicates no errors
-        )
+            return CreateCustomer(
+                customer=customer,  # DjangoObjectType automatically serializes the model instance
+                message="Customer created successfully.",
+                success=True,
+                errors=[]
+            )
+        except IntegrityError:
+            # This catches unique constraint errors (e.g., duplicate email)
+            return CreateCustomer(
+                success=False,
+                errors=[ErrorType(field="email", message="Email already exists.", code="DUPLICATE_EMAIL")]
+            )
+        except ValidationError as e:
+            # Catches validation errors from Django model fields (like EmailValidator)
+            # and potentially from model's clean() method.
+            field_errors = []
+            if hasattr(e, 'message_dict'):
+                for field, messages in e.message_dict.items():
+                    for msg in messages:
+                        field_errors.append(ErrorType(field=field, message=msg, code="VALIDATION_ERROR"))
+            else:  # For non-field errors
+                field_errors.append(ErrorType(message=str(e), code="VALIDATION_ERROR"))
+            return CreateCustomer(success=False, errors=field_errors)
+        except Exception as e:
+            # Catch any other unexpected errors during creation
+            return CreateCustomer(
+                success=False,
+                errors=[
+                    ErrorType(field="general", message=f"An unexpected error occurred: {str(e)}", code="SERVER_ERROR")]
+            )
+
 
 class BulkCreateCustomers(graphene.Mutation):
     """
-    Mutation to create multiple customer instances in one request.
-    Supports partial success: valid customers are created, errors are reported for failed ones.
+    Mutation for bulk creation of Customer instances.
+    Leverages Django's bulk_create for efficiency.
+    Handles individual validation and partial success.
     """
+
     class Arguments:
-        # Takes a list of CustomerInput objects for bulk creation.
         input = graphene.List(CustomerInput, required=True)
 
-    # Output fields for bulk operation
     customers = graphene.List(CustomerType, description="List of customers successfully created.")
     errors = graphene.List(ErrorType, description="List of errors for customers that failed creation.")
     success_count = graphene.Int(description="The number of customers successfully created.")
 
     def mutate(self, info, input):
-        created_customers = [] # To store successfully created CustomerType instances
-        errors_list = []       # To store ErrorType instances for failures
+        customers_to_create = []  # List to hold Django Customer model instances (not yet saved)
+        errors_list = []
         success_count = 0
 
-        # Regex for email and phone validation (repeated for clarity within this mutation)
-        email_regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        phone_regex = r"^(\+\d{1,3})?\d{10,15}$|^\d{3}-\d{3}-\d{4}$"
+        # Regex for phone validation (EmailField handles basic email format)
+        phone_regex_pattern = r"^(\+\d{1,3})?\d{10,15}$|^\d{3}[-\s]?\d{3}[-\s]?\d{4}$"
 
         # Keep track of emails encountered within this batch to ensure uniqueness
         # *within* the bulk upload itself, in addition to existing data.
         emails_in_current_batch = set()
 
-        # Iterate through each customer data dictionary in the input list
-        for i, customer_input in enumerate(input):
-            item_errors = [] # Errors specific to the current customer in the loop
+        for i, customer_input_data in enumerate(input):
+            item_errors = []
 
-            # Validate name presence (though Graphene handles required=True for InputType)
-            if not customer_input.name:
-                 item_errors.append(ErrorType(
-                    field=f"input[{i}].name",
-                    message=f"Customer at index {i} has no name.",
-                    code="REQUIRED_FIELD"
-                ))
+            # 1. Basic field presence/type validation (Graphene handles 'required=True' typically)
+            if not customer_input_data.name:
+                item_errors.append(ErrorType(field=f"input[{i}].name", message=f"Customer at index {i} has no name.",
+                                             code="REQUIRED_FIELD"))
+            if not customer_input_data.email:
+                item_errors.append(ErrorType(field=f"input[{i}].email", message=f"Customer at index {i} has no email.",
+                                             code="REQUIRED_FIELD"))
 
-            # Validate email format
-            if not re.fullmatch(email_regex, customer_input.email):
-                item_errors.append(ErrorType(
-                    field=f"input[{i}].email", # Indicate which item in the list has the error
-                    message=f"Customer at index {i}: Invalid email format.",
-                    code="INVALID_FORMAT"
-                ))
-            # Validate email uniqueness against existing data AND within the current batch
-            if not InMemoryDataStore.is_customer_email_unique(customer_input.email) or \
-               customer_input.email in emails_in_current_batch:
-                item_errors.append(ErrorType(
-                    field=f"input[{i}].email",
-                    message=f"Customer at index {i}: Email already exists or is a duplicate within this batch.",
-                    code="DUPLICATE_EMAIL"
-                ))
+            # 2. Validate email format (Django's EmailField validates on save, but pre-check helps)
+            try:
+                EmailValidator(message="Invalid email format.")(customer_input_data.email)
+            except ValidationError:
+                item_errors.append(
+                    ErrorType(field=f"input[{i}].email", message=f"Customer at index {i}: Invalid email format.",
+                              code="INVALID_FORMAT"))
+
+            # 3. Validate email uniqueness against existing DB data AND within the current batch
+            if Customer.objects.filter(email=customer_input_data.email).exists() or \
+                    customer_input_data.email in emails_in_current_batch:
+                item_errors.append(ErrorType(field=f"input[{i}].email",
+                                             message=f"Customer at index {i}: Email already exists or is a duplicate within this batch.",
+                                             code="DUPLICATE_EMAIL"))
             else:
-                emails_in_current_batch.add(customer_input.email) # Add to set if unique so far
+                emails_in_current_batch.add(customer_input_data.email)  # Add to set if unique so far
 
-            # Validate phone format if provided
-            if customer_input.phone:
-                if not re.fullmatch(phone_regex, customer_input.phone):
-                    item_errors.append(ErrorType(
-                        field=f"input[{i}].phone",
-                        message=f"Customer at index {i}: Invalid phone format.",
-                        code="INVALID_FORMAT"
-                    ))
+            # 4. Validate phone format if provided
+            if customer_input_data.phone:
+                if not re.fullmatch(phone_regex_pattern, customer_input_data.phone):
+                    item_errors.append(
+                        ErrorType(field=f"input[{i}].phone", message=f"Customer at index {i}: Invalid phone format.",
+                                  code="INVALID_FORMAT"))
 
             # If this specific customer record has errors, add them to the main errors list
             # and skip creating this customer, then move to the next in the batch.
             if item_errors:
                 errors_list.extend(item_errors)
-                continue # Skip to the next customer in the loop
+                continue
 
-            # If all validations pass for this customer, create it
-            try:
-                customer_data = InMemoryDataStore.create_customer(
-                    name=customer_input.name,
-                    email=customer_input.email,
-                    phone=customer_input.phone
+            # If all validations pass for this customer, create a Django model instance (don't save yet)
+            customers_to_create.append(
+                Customer(
+                    name=customer_input_data.name,
+                    email=customer_input_data.email,
+                    phone=customer_input_data.phone
                 )
-                created_customers.append(CustomerType(**customer_data)) # Add to successes
-                success_count += 1
-            except Exception as e:
-                # Catch any unexpected errors during the actual creation process
-                errors_list.append(ErrorType(
-                    field=f"input[{i}].general",
-                    message=f"Customer at index {i}: An unexpected error occurred during creation: {str(e)}",
-                    code="INTERNAL_ERROR"
-                ))
+            )
 
-        # Return the collected results of the bulk operation
+        # Use a database transaction for bulk_create to ensure atomicity for the valid ones.
+        # If any bulk_create fails (e.g., due to DB-level constraint not caught above), it rolls back.
+        with transaction.atomic():
+            created_instances = Customer.objects.bulk_create(customers_to_create, ignore_conflicts=True)
+            # `ignore_conflicts=True` will skip objects that violate unique constraints,
+            # but doesn't tell us *which* ones were skipped directly from the return value.
+            # We already handled duplicate emails in Python logic above, which is better for feedback.
+
+            # The `created_instances` list will contain the objects that were actually created.
+            success_count = len(created_instances)
+
+            # FIXED: For the output, we return the Django instances directly (DjangoObjectType handles conversion)
+            created_customers = created_instances
+
         return BulkCreateCustomers(
             customers=created_customers,
-            errors=errors_list,
+            errors=errors_list,  # Errors from pre-validation
             success_count=success_count
         )
 
+
 class CreateProduct(graphene.Mutation):
     """
-    Mutation to create a single Product instance.
-    Includes validation for price (positive) and stock (non-negative).
+    Mutation to create a single Product instance using Django ORM.
+    Handles validation from Django model's clean method.
     """
+
     class Arguments:
         input = ProductInput(required=True)
 
@@ -395,55 +240,52 @@ class CreateProduct(graphene.Mutation):
     errors = graphene.List(ErrorType, description="A list of detailed errors if validation failed.")
 
     def mutate(self, info, input):
-        validation_errors = []
+        try:
+            # Create a Product instance
+            product = Product(
+                name=input.name,
+                price=input.price,
+                stock=input.stock
+            )
+            # Call full_clean() to run all model validation (field validators and clean() method)
+            product.full_clean()
+            product.save()  # Save to the database
 
-        # --- Validation Logic ---
-        # 1. Ensure price is positive
-        # input.price is already a decimal.Decimal due to graphene.Decimal type
-        if input.price <= 0:
-            validation_errors.append(ErrorType(
-                field="price",
-                message="Price must be a positive value.",
-                code="INVALID_VALUE"
-            ))
+            return CreateProduct(
+                product=product,  # DjangoObjectType automatically serializes the model instance
+                success=True,
+                errors=[]
+            )
+        except ValidationError as e:
+            # Catch validation errors from the model
+            field_errors = []
+            if hasattr(e, 'message_dict'):
+                for field, messages in e.message_dict.items():
+                    for msg in messages:
+                        field_errors.append(ErrorType(field=field, message=msg, code="VALIDATION_ERROR"))
+            else:
+                field_errors.append(ErrorType(message=str(e), code="VALIDATION_ERROR"))
+            return CreateProduct(success=False, errors=field_errors)
+        except Exception as e:
+            return CreateProduct(
+                success=False,
+                errors=[
+                    ErrorType(field="general", message=f"An unexpected error occurred: {str(e)}", code="SERVER_ERROR")]
+            )
 
-        # 2. Ensure stock is non-negative
-        if input.stock < 0:
-            validation_errors.append(ErrorType(
-                field="stock",
-                message="Stock cannot be negative.",
-                code="INVALID_VALUE"
-            ))
-
-        if validation_errors:
-            return CreateProduct(success=False, errors=validation_errors)
-
-        # --- Business Logic ---
-        product_data = InMemoryDataStore.create_product(
-            name=input.name,
-            price=input.price,
-            stock=input.stock
-        )
-
-        # --- Return Success ---
-        return CreateProduct(
-            product=ProductType(**product_data),
-            success=True,
-            errors=[]
-        )
 
 class CreateOrder(graphene.Mutation):
     """
-    Mutation to create an Order instance.
-    Handles nested order creation with product associations,
-    and robust validation for customer and product IDs.
-    Calculates total_amount automatically.
+    Mutation to create an Order instance with nested customer and product associations.
+    Uses Django ORM for fetching and creating.
     """
+
     class Arguments:
-        customer_id = graphene.String(required=True, description="The ID of the customer placing the order.")
-        # product_ids is a list of product IDs (strings)
-        product_ids = graphene.List(graphene.String, required=True, description="A list of product IDs to include in the order.")
-        order_date = graphene.DateTime(description="Optional order date, defaults to current time if not provided.")
+        customer_id = graphene.ID(required=True,
+                                  description="The Global ID of the customer placing the order.")  # Use graphene.ID
+        product_ids = graphene.List(graphene.ID, required=True,
+                                    description="A list of Global IDs of products to include in the order.")  # Use graphene.ID
+        order_date = graphene.DateTime(description="Optional order date, defaults to current time.")
 
     order = graphene.Field(OrderType, description="The created order object with nested customer and product data.")
     success = graphene.Boolean(description="True if the order was created, False otherwise.")
@@ -452,123 +294,136 @@ class CreateOrder(graphene.Mutation):
     def mutate(self, info, customer_id, product_ids, order_date=None):
         validation_errors = []
 
-        # --- Validation Logic ---
-        # 1. Validate customer_id: Must exist in our store
-        customer = InMemoryDataStore.get_customer_by_id(customer_id)
-        if not customer:
-            validation_errors.append(ErrorType(
-                field="customerId",
-                message=f"Customer with ID '{customer_id}' not found.",
-                code="CUSTOMER_NOT_FOUND"
-            ))
+        # 1. Resolve Global IDs to actual Django model IDs (integers)
+        try:
+            # Node.from_global_id converts the GraphQL Global ID (e.g., "Customer:1")
+            # into a tuple (type_name, id). We only need the ID.
+            _, local_customer_id = Node.from_global_id(customer_id)
+            local_customer_id = int(local_customer_id)  # FIXED: Ensure it's an integer
+        except Exception:
+            validation_errors.append(
+                ErrorType(field="customerId", message="Invalid customer ID format.", code="INVALID_ID_FORMAT"))
+            return CreateOrder(success=False, errors=validation_errors)
 
-        # 2. Ensure at least one product is selected
-        if not product_ids:
-            validation_errors.append(ErrorType(
-                field="productIds",
-                message="At least one product must be selected for the order.",
-                code="REQUIRED_FIELD"
-            ))
+        local_product_ids = []
+        for prod_global_id in product_ids:
+            try:
+                _, local_prod_id = Node.from_global_id(prod_global_id)
+                local_product_ids.append(int(local_prod_id))  # FIXED: Ensure it's an integer
+            except Exception:
+                validation_errors.append(
+                    ErrorType(field="productIds", message=f"Invalid product ID format for '{prod_global_id}'.",
+                              code="INVALID_ID_FORMAT"))
+                # Don't break loop, collect all ID format errors
 
-        # 3. Validate product_ids: All must exist and calculate total_amount
-        products_for_order = []
+        if validation_errors:
+            return CreateOrder(success=False, errors=validation_errors)
+
+        # 2. Validate customer and products existence using Django ORM
+        customer_obj = None
+        try:
+            customer_obj = Customer.objects.get(id=local_customer_id)
+        except ObjectDoesNotExist:
+            validation_errors.append(
+                ErrorType(field="customerId", message=f"Customer with ID '{local_customer_id}' not found.",
+                          code="CUSTOMER_NOT_FOUND"))
+
+        # Ensure at least one product is selected
+        if not local_product_ids:
+            validation_errors.append(
+                ErrorType(field="productIds", message="At least one product must be selected for the order.",
+                          code="REQUIRED_FIELD"))
+
+        # Fetch all products at once
+        product_objs = []
         total_amount = decimal.Decimal('0.00')
-        # Use a set to track product IDs already processed in this order to catch duplicates within the list
-        seen_product_ids = set()
 
-        for prod_id in product_ids:
-            if prod_id in seen_product_ids:
-                validation_errors.append(ErrorType(
-                    field="productIds",
-                    message=f"Duplicate product ID '{prod_id}' found in order.",
-                    code="DUPLICATE_PRODUCT"
-                ))
-                continue # Skip this duplicate and continue processing other products
+        # Using a Q object for an OR query (id=id1 OR id=id2...)
+        # This is more efficient than looping and calling .get() for each.
+        products_query_set = Product.objects.filter(id__in=local_product_ids)
+        if len(products_query_set) != len(set(local_product_ids)):  # Check if all requested unique products were found
+            found_ids = {p.id for p in products_query_set}  # FIXED: Compare integers to integers
+            missing_ids = [pid for pid in local_product_ids if pid not in found_ids]
+            for missing_id in missing_ids:
+                validation_errors.append(
+                    ErrorType(field="productIds", message=f"Product with ID '{missing_id}' not found.",
+                              code="PRODUCT_NOT_FOUND"))
 
-            product = InMemoryDataStore.get_product_by_id(prod_id)
-            if not product:
-                validation_errors.append(ErrorType(
-                    field="productIds",
-                    message=f"Product with ID '{prod_id}' not found.",
-                    code="PRODUCT_NOT_FOUND"
-                ))
-            else:
-                products_for_order.append(product)
-                total_amount += product["price"] # Summing up prices
-                seen_product_ids.add(prod_id) # Add to seen set
+        # Populate product_objs and calculate total_amount based on fetched products
+        for prod_obj in products_query_set:
+            product_objs.append(prod_obj)
+            total_amount += prod_obj.price
 
         # If any validation errors accumulated, return them
         if validation_errors:
             return CreateOrder(success=False, errors=validation_errors)
 
-        # If order_date is not provided, default to current UTC time
+        # Set order date
         if order_date is None:
-            order_date = datetime.datetime.now(datetime.timezone.utc)
+            order_date = timezone.now()  # FIXED: Use Django's timezone-aware now
 
-        # --- Business Logic ---
-        # Create the order in the data store, storing just customer and product IDs internally
-        order_data = InMemoryDataStore.create_order(
-            customer_id=customer_id,
-            product_ids=[p["id"] for p in products_for_order], # Store only IDs in the raw order data
-            total_amount=total_amount,
-            order_date=order_date
-        )
+        # Use a transaction for atomic order creation and product association
+        with transaction.atomic():
+            try:
+                # Create the order instance
+                order = Order.objects.create(
+                    customer=customer_obj,
+                    total_amount=total_amount,
+                    order_date=order_date
+                )
+                # Associate products with the order (ManyToMany relationship)
+                order.products.set(product_objs)  # .set() replaces existing products with the new set
+                # For adding to existing, use .add() method: order.products.add(*product_objs)
 
-        # --- Return Created Order with Nested Data ---
-        # For the GraphQL response, we need to return the full CustomerType and ProductType objects.
-        return CreateOrder(
-            order=OrderType(
-                id=order_data["id"],
-                customer=CustomerType(**customer), # Pass the fetched customer dictionary converted to CustomerType
-                products=[ProductType(**p) for p in products_for_order], # Convert fetched product dictionaries to ProductType
-                total_amount=order_data["total_amount"],
-                order_date=order_data["order_date"]
-            ),
-            success=True,
-            errors=[]
-        )
+                return CreateOrder(
+                    order=order,  # DjangoObjectType will automatically serialize this
+                    success=True,
+                    errors=[]
+                )
+            except ValidationError as e:
+                field_errors = []
+                if hasattr(e, 'message_dict'):
+                    for field, messages in e.message_dict.items():
+                        for msg in messages:
+                            field_errors.append(ErrorType(field=field, message=msg, code="VALIDATION_ERROR"))
+                else:
+                    field_errors.append(ErrorType(message=str(e), code="VALIDATION_ERROR"))
+                return CreateOrder(success=False, errors=field_errors)
+            except Exception as e:
+                return CreateOrder(
+                    success=False,
+                    errors=[ErrorType(field="general", message=f"An unexpected error occurred: {str(e)}",
+                                      code="SERVER_ERROR")]
+                )
 
-# --- Root Query Class (for fetching data - added for completeness/testing) ---
-# This allows you to query the data you've created via mutations.
+
+# --- Root Query Class (Now querying Django Models) ---
 class Query(graphene.ObjectType):
     """
     The root query class for fetching data from the CRM system.
     """
-    # Define query fields that return lists of our types
+    node = Node.Field()  # Essential for Relay Global IDs
+
+    # Query fields now directly return lists of Django model instances
+    # Graphene-Django's DjangoObjectType handles the conversion automatically.
     all_customers = graphene.List(CustomerType, description="Retrieve all customers.")
     all_products = graphene.List(ProductType, description="Retrieve all products.")
-    all_orders = graphene.List(OrderType, description="Retrieve all orders with nested customer and product data.")
+    all_orders = graphene.List(OrderType, description="Retrieve all orders.")
 
-    # Resolver methods for each query field
     def resolve_all_customers(self, info):
-        # Convert raw customer dictionaries from data store into CustomerType instances
-        return [CustomerType(**c) for c in InMemoryDataStore.get_all_customers()]
+        # Simply return all customer objects from the database
+        return Customer.objects.all()
 
     def resolve_all_products(self, info):
-        # Convert raw product dictionaries from data store into ProductType instances
-        return [ProductType(**p) for p in InMemoryDataStore.get_all_products()]
+        # Simply return all product objects from the database
+        return Product.objects.all()
 
     def resolve_all_orders(self, info):
-        # The InMemoryDataStore.get_all_orders method already prepares nested data.
-        # We just need to convert these prepared dictionaries into Graphene's OrderType.
-        orders_data = InMemoryDataStore.get_all_orders()
-        graphene_orders = []
-        for order_data in orders_data:
-            # Reconstruct OrderType, ensuring nested customer and product lists are also Graphene types
-            graphene_orders.append(
-                OrderType(
-                    id=order_data["id"],
-                    # Check if customer exists (could be None if ID was invalid)
-                    customer=CustomerType(**order_data["customer"]) if order_data["customer"] else None,
-                    # Convert each product dictionary in the list to ProductType
-                    products=[ProductType(**p) for p in order_data["products"]],
-                    total_amount=order_data["total_amount"],
-                    order_date=order_data["order_date"]
-                )
-            )
-        return graphene_orders
+        # Simply return all order objects from the database
+        return Order.objects.all()
 
-# --- 4. Root Mutation Class (Combines all defined mutations) ---
+
+# --- Root Mutation Class (Same structure, but methods are ORM-based) ---
 class Mutation(graphene.ObjectType):
     """
     The root mutation class that exposes all available mutations for the CRM system.
@@ -577,6 +432,3 @@ class Mutation(graphene.ObjectType):
     bulk_create_customers = BulkCreateCustomers.Field(description="Creates multiple customers in a single request.")
     create_product = CreateProduct.Field(description="Creates a new product.")
     create_order = CreateOrder.Field(description="Creates a new order, associating it with customers and products.")
-
-
-# schema = graphene.Schema(query=Query, mutation=Mutation)
