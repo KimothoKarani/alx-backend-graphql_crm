@@ -1,0 +1,1 @@
+0 8 * * * /mnt/c/Users/Admin/ALX/alx-backend-graphql_crm/crm/cron_jobs/run_order_reminders.sh
