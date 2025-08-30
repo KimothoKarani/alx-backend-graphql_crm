@@ -24,6 +24,11 @@ one_year_ago = timezone.now() - timedelta(days=365)
 active_customer_ids = Order.objects.filter(order_date__gte=one_year_ago).values_list('customer_id', flat=True).distinct()
 inactive_customers_queryset = Customer.objects.exclude(id__in=active_customer_ids)
 
+# Count inactive customers before deleting
+inactive_count = inactive_customers_queryset.count()
+print(f"[{timestamp}] Found {inactive_count} inactive customers.")
+
+# Delete them
 num_deleted, _ = inactive_customers_queryset.delete()
 print(f"[{timestamp}] Finished cleanup. Deleted {num_deleted} inactive customers.")
 EOF
