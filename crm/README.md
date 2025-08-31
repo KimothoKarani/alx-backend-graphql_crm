@@ -1,7 +1,6 @@
 ## CRM Application – Production Task Scheduling
 
-This document describes how to run **background tasks** for the CRM application using **Celery** and **Celery Beat**, with Redis as the message broker.
-
+This document outlines the steps to set up and manage background tasks for the CRM application using Celery, Celery Beat, and system cron jobs.
 * * *
 
 ## Why Celery Instead of Cron?
@@ -42,119 +41,65 @@ In early development, we used `django-crontab` for jobs like cleanup and reminde
 
 * * *
 
-## Setup
+## Setup Steps
 
-### 1\. Install Dependencies
+1.  **Install Python Dependencies:**
+    Navigate to your project's root directory and activate your virtual environment.
+    ```bash
+    cd /mnt/c/Users/Admin/ALX/alx-backend-graphql_crm # Adjust path as needed
+    source venv/bin/activate
+    pip install -r requirements.txt
+    ```
+    *(Ensure `requirements.txt` contains `celery`, `django-celery-beat`, `redis`, `gql[requests]`, `django-crontab`.)*
 
-Make sure you have the required packages:
+2.  **Run Django Migrations:**
+    Apply database migrations for `django-celery-beat` and your CRM app models.
+    ```bash
+    python manage.py makemigrations crm django_celery_beat
+    python manage.py migrate
+    ```
 
-`cd /mnt/c/Users/Admin/ALX/alx-backend-graphql_crm`
+3.  **Start Django Development Server:**
+    Your GraphQL endpoint (`http://localhost:8000/graphql/`) needs to be running for Celery tasks (and system cron jobs) that interact with it.
+    ```bash
+    python manage.py runserver
+    ```
+    *(Keep this running in a separate terminal.)*
 
-`source venv/bin/activate`
+4.  **Start Celery Worker:**
+    This process listens for tasks and executes them. Run this in a **new terminal** (with virtual environment activated).
+    ```bash
+    celery -A crm worker -l info
+    ```
+    *(Ensure you are in the project root with your virtual environment activated before running.)*
 
-`pip install -r requirements.txt`
+5.  **Start Celery Beat Scheduler:**
+    This process reads the schedule (`CELERY_BEAT_SCHEDULE` from `settings.py` or database for `django-celery-beat`) and periodically sends tasks to the Celery worker queue. Run this in a **third terminal** (with virtual environment activated).
+    ```bash
+    celery -A crm beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    ```
+    *(Ensure you are in the project root with your virtual environment activated before running.)*
 
-`requirements.txt` should include:
+6.  **Verify System Cron Jobs (Optional, for `django-crontab` and `clean_inactive_customers.sh`):**
+    These jobs run separately from Celery.
+    ```bash
+    # Remove old django-crontab entries
+    python manage.py crontab remove
+    # Add entries from crm/settings.py
+    python manage.py crontab add
+    # Verify they are in the system crontab
+    crontab -l
+    ```
 
-`celery`
+## Verification
 
-`django-celery-beat`
-
-`redis`
-
-`gql[requests]`
-
-* * *
-
-### 2\. Migrations
-
-Set up database tables for Celery Beat scheduling and CRM models:
-
-`python manage.py makemigrations crm django_celery_beat`
-
-`python manage.py migrate`
-
-* * *
-
-### 3\. Run the Django Server
-
-Your GraphQL endpoint must be live so Celery tasks can query/mutate data:
-
-`python manage.py runserver`
-
-* * *
-
-### 4\. Start Celery Worker
-
-Run this in a new terminal (inside your venv):
-
-`cd /mnt/c/Users/Admin/ALX/alx-backend-graphql_crm`
-
-`source venv/bin/activate`
-
-`celery -A crm worker -l info`
-
-* * *
-
-### 5\. Start Celery Beat
-
-Run this in another terminal (inside your venv):
-
-`cd /mnt/c/Users/Admin/ALX/alx-backend-graphql_crm`
-
-`source venv/bin/activate`
-
-`celery -A crm beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler`
-
-This uses the **database scheduler**, meaning you can manage task schedules directly from Django Admin.
-
-* * *
-
-### 6\. (Optional) Monitor with Flower
-
-Flower provides a live dashboard for Celery:
-
-`pip install flower`
-
-`celery -A crm flower --port=5555`
-
-Then open:
-
-`http://localhost:5555`
-
-* * *
-
-## Configured Scheduled Tasks
-
-All periodic tasks are now managed by **Celery Beat**.
-
-Your `crm/settings.py` (or `alx_backend_graphql_crm/settings.py`) should include:
-
-`from celery.schedules import crontab`
-
-`CELERY_BEAT_SCHEDULE = {     "customer-cleanup": {         "task": "crm.tasks.clean_inactive_customers",         "schedule": crontab(hour=2, minute=0, day_of_week="sun"),  # Sundays at 2 AM     },     "order-reminders": {         "task": "crm.tasks.send_order_reminders",         "schedule": crontab(hour="8,20", minute=0),  # Daily at 8 AM and 8 PM     },     "crm-heartbeat": {         "task": "crm.tasks.log_crm_heartbeat",         "schedule": crontab(minute="*/5"),  # Every 5 minutes     },     "crm-weekly-report": {         "task": "crm.tasks.generate_crm_report",         "schedule": crontab(day_of_week="mon", hour=6, minute=0),  # Mondays at 6 AM     }, }`
-
-* * *
-
-## 🔹 Logs
-
-Each task writes to its own log in `/tmp/`:
-
-*   `/tmp/customer_cleanup_log.txt` → inactive customer cleanup
-    
-*   `/tmp/order_reminders_log.txt` → daily reminders
-    
-*   `/tmp/crm_heartbeat_log.txt` → heartbeat pings
-    
-*   `/tmp/crm_report_log.txt` → weekly CRM reports
-    
-
-Check logs with:
-
-`tail -f /tmp/crm_report_log.txt`
-
-* * *
-
+-   **Celery Worker/Beat Logs:** Observe the terminal windows where `celery worker` and `celery beat` are running. You should see messages indicating tasks being scheduled and executed.
+-   **Log Files:** Check the following log files for output from your scheduled tasks:
+    -   `/tmp/customer_cleanup_log.txt` (from Task 0)
+    -   `/tmp/order_reminders_log.txt` (from Task 1)
+    -   `/tmp/crm_heartbeat_log.txt` (from Task 2)
+    -   `/tmp/crm_report_log.txt` (from Task 3 - Celery task)
+-   **Check GraphQL Endpoints:** Use GraphiQL/GraphQL Playground (`http://localhost:8000/graphql-playground/`) to verify data changes (e.g., product stock after `update_low_stock` cron job runs).
 ## Summary
 
 *   Use **Celery Worker** to run tasks.
