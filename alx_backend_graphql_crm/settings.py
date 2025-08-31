@@ -42,6 +42,8 @@ INSTALLED_APPS = [
     'django.contrib.sites',
     'accounts',
     'django_filters',
+    'django_crontab',
+
 ]
 
 SITE_ID = 1
@@ -135,3 +137,7 @@ GRAPHENE = {
 }
 
 AUTH_USER_MODEL = 'accounts.CustomUser'
+
+CRONJOBS = [
+    ('*/5 * * * *', 'crm.cron.log_crm_heartbeat'),
+]
