@@ -5,7 +5,7 @@ import re
 from django.core.exceptions import ValidationError, ObjectDoesNotExist
 from django.core.validators import EmailValidator
 from django.db import IntegrityError, transaction
-from django.db.models import Q  # Already used in filters.py
+from django.db.models import Q, F  # Already used in filters.py
 from django.utils import timezone  # For timezone.now()
 from graphene_django.types import DjangoObjectType
 from graphene.relay import Node  # For Relay Global IDs
@@ -299,6 +299,78 @@ class CreateOrder(graphene.Mutation):
                     ErrorType(field="general", message=f"An unexpected error occurred: {str(e)}", code="SERVER_ERROR")])
 
 
+class UpdateLowStockProducts(graphene.Mutation):
+    """
+    Mutation to query products with stock < 10, increment their stock by 10,
+    and return the updated products.
+    """
+
+    class Arguments:
+        # No specific inputs required, as the logic is internal to find low-stock products.
+        # You could add a 'threshold' or 'increment_by' argument if you wanted to make it dynamic.
+        pass
+
+    # Output fields
+    updated_products = graphene.List(ProductType, description="List of products whose stock was updated.")
+    message = graphene.String(description="A message indicating the outcome.")
+    success = graphene.Boolean(description="True if the operation was successful, False otherwise.")
+    errors = graphene.List(ErrorType, description="List of errors encountered.")
+
+    def mutate(self, info):
+        updated_products_list = []
+        errors_list = []
+
+        try:
+            # 1. Query products with stock < 10
+            # Used select_for_update() to lock these rows during the update transaction
+            # to prevent race conditions if multiple processes tried to update simultaneously.
+            # Bets for concurrent environments.
+            low_stock_products_queryset = Product.objects.filter(stock__lt=10).select_for_update()
+
+            if not low_stock_products_queryset.exists():
+                return UpdateLowStockProducts(
+                    updated_products=[],
+                    message="No low-stock products found to update.",
+                    success=True,
+                    errors=[]
+                )
+
+            # 2. Perform the update in a database transaction
+            with transaction.atomic():
+                # Store IDs before updating, to fetch full objects later
+                product_ids_to_update = [p.id for p in low_stock_products_queryset]
+
+                # Bulk update: Used F() expression to update stock directly in the database
+                # This is more efficient and atomic than fetching each object, modifying, and saving.
+                updated_count = low_stock_products_queryset.update(stock=F('stock') + 10)
+
+                # 3. Retrieve the updated products to return them
+                # Used in_bulk for efficient retrieval of specific IDs
+                updated_product_instances = Product.objects.filter(id__in=product_ids_to_update)
+
+                # Convert to list of ProductType for GraphQL output
+                updated_products_list = [ProductType(**p.__dict__) for p in updated_product_instances]
+
+            return UpdateLowStockProducts(
+                updated_products=updated_products_list,
+                message=f"Successfully restocked {updated_count} low-stock products.",
+                success=True,
+                errors=[]
+            )
+
+        except Exception as e:
+            errors_list.append(ErrorType(
+                field="general",
+                message=f"An error occurred during low-stock product update: {str(e)}",
+                code="SERVER_ERROR"
+            ))
+            return UpdateLowStockProducts(
+                updated_products=[],
+                message="Failed to update low-stock products due to an error.",
+                success=False,
+                errors=errors_list
+            )
+
 # --- Root Query Class (Using DjangoFilterConnectionField) ---
 class Query(graphene.ObjectType):
     """
@@ -330,9 +402,12 @@ class Query(graphene.ObjectType):
     # The default resolver simply returns the queryset from the associated model.
 
 
+
 # --- Root Mutation Class (Same as previous solution) ---
 class Mutation(graphene.ObjectType):
     create_customer = CreateCustomer.Field()
     bulk_create_customers = BulkCreateCustomers.Field()
     create_product = CreateProduct.Field()
     create_order = CreateOrder.Field()
+    update_low_stock_products = UpdateLowStockProducts.Field(description="Updates stock for products with less than 10 units.")
+
