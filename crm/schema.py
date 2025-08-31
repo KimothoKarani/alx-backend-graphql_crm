@@ -12,7 +12,8 @@ from graphene.relay import Node  # For Relay Global IDs
 from graphene_django.filter import DjangoFilterConnectionField  # <--- CRUCIAL IMPORT for filtering!
 
 # Import your Django Models
-from .models import Customer, Product, Order
+from .models import Customer, Order
+from crm.models import Product
 
 # Import your Filter Classes
 from .filters import CustomerFilter, ProductFilter, OrderFilter  # <--- NEW IMPORT
