@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'accounts',
     'django_filters',
     'django_crontab',
+    'django_celery_beat',
 
 ]
 
@@ -142,3 +143,13 @@ CRONJOBS = [
     ('*/5 * * * *', 'crm.cron.log_crm_heartbeat'),
     ('0 */12 * * *', 'crm.cron.update_low_stock'),
 ]
+
+# --- Celery Configuration ---
+# Redis as the message broker
+CELERY_BROKER_URL = 'redis://localhost:6379/0'
+# Optional: Store task results in Redis too (useful for debugging, monitoring)
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'UTC' # Use UTC for consistency
